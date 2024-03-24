@@ -33,10 +33,11 @@ class get_model(nn.Module):
         x = self.drop1(F.relu(self.bn1(self.fc1(x))))
         x = self.drop2(F.relu(self.bn2(self.fc2(x))))
         x = self.fc3(x)
-        x = F.log_softmax(x, -1)
+        logits = x[:, :]
+        #x = F.log_softmax(x, -1)
+        x = F.softmax(x, -1)
 
-
-        return x, l3_points
+        return x, logits
 
 
 

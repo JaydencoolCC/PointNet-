@@ -18,7 +18,9 @@ import argparse
 from pathlib import Path
 from tqdm import tqdm
 from data_utils.ModelNetDataLoader import ModelNetDataLoader
+from utils.dataset_tools import get_train_val_split, get_subsampled_dataset, print_attack_results, get_member_non_member_split
 
+from attack import ThresholdAttack, SalemAttack, EntropyAttack
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = BASE_DIR
 sys.path.append(os.path.join(ROOT_DIR, 'models'))
@@ -27,19 +29,21 @@ def parse_args():
     '''PARAMETERS'''
     parser = argparse.ArgumentParser('training')
     parser.add_argument('--use_cpu', action='store_true', default=False, help='use cpu mode')
-    parser.add_argument('--gpu', type=str, default='0', help='specify gpu device')
-    parser.add_argument('--batch_size', type=int, default=24, help='batch size in training')
-    parser.add_argument('--model', default='pointnet_cls', help='model name [default: pointnet_cls]')
+    parser.add_argument('--gpu', type=str, default='4', help='specify gpu device')
+    parser.add_argument('--batch_size', type=int, default=128, help='batch size in training')
+    parser.add_argument('--model', default='pointnet2_cls_ssg', help='model name [default: pointnet_cls]')
     parser.add_argument('--num_category', default=40, type=int, choices=[10, 40],  help='training on ModelNet10/40')
     parser.add_argument('--epoch', default=200, type=int, help='number of epoch in training')
     parser.add_argument('--learning_rate', default=0.001, type=float, help='learning rate in training')
     parser.add_argument('--num_point', type=int, default=1024, help='Point Number')
     parser.add_argument('--optimizer', type=str, default='Adam', help='optimizer for training')
-    parser.add_argument('--log_dir', type=str, default=None, help='experiment root')
+    parser.add_argument('--log_dir', type=str, default='pointnet2_cls_ssg', help='experiment root')
     parser.add_argument('--decay_rate', type=float, default=1e-4, help='decay rate')
     parser.add_argument('--use_normals', action='store_true', default=False, help='use normals')
     parser.add_argument('--process_data', action='store_true', default=False, help='save data offline')
     parser.add_argument('--use_uniform_sample', action='store_true', default=False, help='use uniform sampiling')
+    parser.add_argument('--train', action='store_true', default=False, help='train model')
+
     return parser.parse_args()
 
 
@@ -120,16 +124,28 @@ def main(args):
 
     train_dataset = ModelNetDataLoader(root=data_path, args=args, split='train', process_data=args.process_data)
     test_dataset = ModelNetDataLoader(root=data_path, args=args, split='test', process_data=args.process_data)
-    trainDataLoader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=10, drop_last=True)
-    testDataLoader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=10)
-
+    
+    train_size = 4400
+    test_size = 1000
+    train_dataset = get_subsampled_dataset(train_dataset, dataset_size=train_size*2, proportion=None)
+    train_target, train_shadow = get_train_val_split(train_dataset, train_size, seed = 7, stratify=False, targets=None)
+    
+    test_dataset = get_subsampled_dataset(test_dataset, dataset_size=test_size*2, proportion=0.5)
+    test_target, test_shadow= get_train_val_split(test_dataset, test_size, stratify=False, targets=None)
+    
+    trainDataLoader_target = torch.utils.data.DataLoader(train_target, batch_size=args.batch_size, shuffle=True, num_workers=10, drop_last=True)
+    trainDataLoader_shadow = torch.utils.data.DataLoader(train_shadow, batch_size=args.batch_size, shuffle=True, num_workers=10, drop_last=True)
+    
+    testDataLoade_target = torch.utils.data.DataLoader(test_target, batch_size=args.batch_size, shuffle=False, num_workers=10)
+    testDataLoade_shadow = torch.utils.data.DataLoader(test_shadow, batch_size=args.batch_size, shuffle=False, num_workers=10)
+    
     '''MODEL LOADING'''
     num_class = args.num_category
     model = importlib.import_module(args.model)
     shutil.copy('./models/%s.py' % args.model, str(exp_dir))
     shutil.copy('models/pointnet2_utils.py', str(exp_dir))
     shutil.copy('./train_classification.py', str(exp_dir))
-
+    
     classifier = model.get_model(num_class, normal_channel=args.use_normals)
     criterion = model.get_loss()
     classifier.apply(inplace_relu)
@@ -159,13 +175,48 @@ def main(args):
         optimizer = torch.optim.SGD(classifier.parameters(), lr=0.01, momentum=0.9)
 
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.7)
+    if(args.train):
+        train(optimizer, scheduler, classifier, start_epoch, logger, log_string, trainDataLoader_target, criterion, testDataLoade_target, checkpoints_dir, num_class, "target") # train target model
+        train(optimizer, scheduler, classifier, start_epoch, logger, log_string, trainDataLoader_shadow, criterion, testDataLoade_shadow, checkpoints_dir, num_class, "shadow") # train shdaow model
+    else:
+        #test for MIA
+        #generate dataset
+        member_target, non_member_target = get_member_non_member_split(train_target, test_target, 1000)
+        member_shadow, non_member_shadow = get_member_non_member_split(train_shadow, test_shadow, 1000)
+        testDataLoade_target = torch.utils.data.DataLoader(test_target, batch_size=args.batch_size, shuffle=False, num_workers=10
+                                                           )
+        target_model = model.get_model(num_class, normal_channel=args.use_normals)
+        shadow_model = model.get_model(num_class, normal_channel=args.use_normals)
+        
+        checkpoint_target = torch.load(str(exp_dir) + '/checkpointstarget_epoch_200_model.pth')
+        checkpoint_shadow = torch.load(str(exp_dir) + '/checkpointsshadow_epoch_200_model.pth')
+        target_model.load_state_dict(checkpoint_target['model_state_dict'])
+        shadow_model.load_state_dict(checkpoint_shadow['model_state_dict'])
+        
+        attacks = [
+            ThresholdAttack(apply_softmax= False),
+            SalemAttack(apply_softmax= False, k=3),
+            EntropyAttack(apply_softmax= False)
+        ]
+        name = ["ThresholdAttack", "SalemAttack", "EntropyAttack"]
+        attack_list = []
+        for i in range(len(attacks)):
+            attack = attacks[i]
+            attack.learn_attack_parameters(shadow_model, member_shadow, non_member_shadow)
+            result = attack.evaluate(target_model, member_target, non_member_target)
+            attack_list.append(result)
+            print_attack_results(name[i], result)    
+        
+def train(optimizer, scheduler, classifier, start_epoch, logger, log_string, trainDataLoader, criterion, testDataLoader, checkpoints_dir, num_class=40, train_type="target"):
+    
     global_epoch = 0
     global_step = 0
     best_instance_acc = 0.0
     best_class_acc = 0.0
 
     '''TRANING'''
-    logger.info('Start training...')
+    logger.info('Start training %s model' % (train_type))
+
     for epoch in range(start_epoch, args.epoch):
         log_string('Epoch %d (%d/%s):' % (global_epoch + 1, epoch + 1, args.epoch))
         mean_correct = []
@@ -199,6 +250,7 @@ def main(args):
         log_string('Train Instance Accuracy: %f' % train_instance_acc)
 
         with torch.no_grad():
+
             instance_acc, class_acc = test(classifier.eval(), testDataLoader, num_class=num_class)
 
             if (instance_acc >= best_instance_acc):
@@ -208,11 +260,11 @@ def main(args):
             if (class_acc >= best_class_acc):
                 best_class_acc = class_acc
             log_string('Test Instance Accuracy: %f, Class Accuracy: %f' % (instance_acc, class_acc))
-            log_string('Best Instance Accuracy: %f, Class Accuracy: %f' % (best_instance_acc, best_class_acc))
+            #log_string('Best Instance Accuracy: %f, Class Accuracy: %f' % (best_instance_acc, best_class_acc))
 
-            if (instance_acc >= best_instance_acc):
+            if (epoch == args.epoch - 1):
                 logger.info('Save model...')
-                savepath = str(checkpoints_dir) + '/best_model.pth'
+                savepath = str(checkpoints_dir) + train_type + "_epoch_%d" %(epoch+1) + '_model.pth'
                 log_string('Saving at %s' % savepath)
                 state = {
                     'epoch': best_epoch,
@@ -223,10 +275,12 @@ def main(args):
                 }
                 torch.save(state, savepath)
             global_epoch += 1
-
     logger.info('End of training...')
+     
 
 
+    
+        
 if __name__ == '__main__':
     args = parse_args()
     main(args)
