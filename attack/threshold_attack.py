@@ -20,26 +20,55 @@ class ThresholdAttack(PredictionScoreAttack):
         labels = [0 for _ in range(len(non_member_dataset))] + [1 for _ in range(len(member_dataset))]
 
         # get the prediction scores of the shadow model on the members and the non-members in order to attack the target model
+        # pred_scores_shadow_member = get_model_prediction_scores(
+        #     model=shadow_model, 
+        #     apply_softmax=self.apply_softmax, 
+        #     dataset=member_dataset, 
+        #     batch_size=self.batch_size, 
+        #     num_workers=8
+        # ).max(dim=1)[0].tolist()
+        
+        #get the prediction scores of the shadow model on the members and the non-members in order to attack the target model
         pred_scores_shadow_member = get_model_prediction_scores(
             model=shadow_model, 
             apply_softmax=self.apply_softmax, 
             dataset=member_dataset, 
             batch_size=self.batch_size, 
             num_workers=8
-        ).max(dim=1)[0].tolist()
-        
+        )
+        max_pred_scores_shadow_member = pred_scores_shadow_member.max(dim=1)[0]
+        second_max_pred_scores_shadow_member = pred_scores_shadow_member.topk(2, dim=1).values[:, 1]
+        pred_scores_shadow_member = ( max_pred_scores_shadow_member - second_max_pred_scores_shadow_member).tolist()
+        pred_scores_shadow_member = max_pred_scores_shadow_member.tolist()
+        # pred_scores_shadow_non_member = get_model_prediction_scores(
+        #     model=shadow_model,
+        #     apply_softmax=self.apply_softmax,
+        #     dataset=non_member_dataset,
+        #     batch_size=self.batch_size,
+        #     num_workers=8
+        # ).max(dim=1)[0].tolist()
         pred_scores_shadow_non_member = get_model_prediction_scores(
             model=shadow_model,
             apply_softmax=self.apply_softmax,
             dataset=non_member_dataset,
             batch_size=self.batch_size,
             num_workers=8
-        ).max(dim=1)[0].tolist()
-
+        )
+        max_pred_scores_shadow_non_member = pred_scores_shadow_non_member.max(dim=1)[0]
+        second_max_pred_scores_shadow_non_member = pred_scores_shadow_non_member.topk(2, dim=1).values[:, 1]
+        pred_scores_shadow_non_member = (max_pred_scores_shadow_non_member - second_max_pred_scores_shadow_non_member).tolist()
+        pred_scores_shadow_non_member = max_pred_scores_shadow_non_member.tolist()
+        
         pred_scores = pred_scores_shadow_non_member + pred_scores_shadow_member
         self.shadow_fpr, self.shadow_tpr, self.thresholds, self.auroc = get_roc(labels, pred_scores)
         threshold_idx = (self.shadow_tpr - self.shadow_fpr).argmax()
         self.attack_treshold = self.thresholds[threshold_idx]
+        
+        print("Threshold: ", self.attack_treshold)
+        nums_member = sum(max_pred_scores_shadow_member > self.attack_treshold)
+        nums_non_member = sum(max_pred_scores_shadow_non_member > self.attack_treshold)
+        print("Number of members: ", nums_member)
+        print("Number of non members: ", nums_non_member)
 
     def predict_membership(self, model: nn.Module, dataset: Dataset):
         # get the prediction scores of the shadow model on the members and the non-members in order to attack the target model

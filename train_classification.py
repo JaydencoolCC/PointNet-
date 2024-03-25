@@ -7,7 +7,7 @@ import os
 import sys
 import torch
 import numpy as np
-
+import copy
 import datetime
 import logging
 import provider
@@ -29,7 +29,7 @@ def parse_args():
     '''PARAMETERS'''
     parser = argparse.ArgumentParser('training')
     parser.add_argument('--use_cpu', action='store_true', default=False, help='use cpu mode')
-    parser.add_argument('--gpu', type=str, default='4', help='specify gpu device')
+    parser.add_argument('--gpu', type=str, default='1', help='specify gpu device')
     parser.add_argument('--batch_size', type=int, default=128, help='batch size in training')
     parser.add_argument('--model', default='pointnet2_cls_ssg', help='model name [default: pointnet_cls]')
     parser.add_argument('--num_category', default=40, type=int, choices=[10, 40],  help='training on ModelNet10/40')
@@ -120,7 +120,7 @@ def main(args):
 
     '''DATA LOADING'''
     log_string('Load dataset ...')
-    data_path = 'data/modelnet40_normal_resampled/'
+    data_path = '/mnt/sharedata/ssd/users/zhanghx/dataset/modelnet40_normal_resampled'
 
     train_dataset = ModelNetDataLoader(root=data_path, args=args, split='train', process_data=args.process_data)
     test_dataset = ModelNetDataLoader(root=data_path, args=args, split='test', process_data=args.process_data)
@@ -150,14 +150,25 @@ def main(args):
     criterion = model.get_loss()
     classifier.apply(inplace_relu)
 
+    target_model = copy.deepcopy(classifier)
+    shadow_model = copy.deepcopy(classifier)
+
+    
     if not args.use_cpu:
         classifier = classifier.cuda()
         criterion = criterion.cuda()
+        target_model = target_model.cuda()
+        shadow_model = shadow_model.cuda()
 
-    try:
-        checkpoint = torch.load(str(exp_dir) + '/checkpoints/best_model.pth')
-        start_epoch = checkpoint['epoch']
-        classifier.load_state_dict(checkpoint['model_state_dict'])
+    try: 
+        checkpoint_target = torch.load(os.path.join(str(checkpoints_dir), "target" + "_epoch_%d" %(args.epoch) + '_model.pth'))
+        checkpoint_shadow = torch.load(os.path.join(str(checkpoints_dir), "shadow" + "_epoch_%d" %(args.epoch) + '_model.pth'))
+        
+        target_model.load_state_dict(checkpoint_target['model_state_dict'])
+        shadow_model.load_state_dict(checkpoint_shadow['model_state_dict'])
+        
+        start_epoch = checkpoint_target['epoch']
+                
         log_string('Use pretrain model')
     except:
         log_string('No existing model, starting training from scratch...')
@@ -176,23 +187,20 @@ def main(args):
 
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.7)
     if(args.train):
-        train(optimizer, scheduler, classifier, start_epoch, logger, log_string, trainDataLoader_target, criterion, testDataLoade_target, checkpoints_dir, num_class, "target") # train target model
-        train(optimizer, scheduler, classifier, start_epoch, logger, log_string, trainDataLoader_shadow, criterion, testDataLoade_shadow, checkpoints_dir, num_class, "shadow") # train shdaow model
+        train(target_model, start_epoch, logger, log_string, trainDataLoader_target, criterion, testDataLoade_target, checkpoints_dir, num_class, "target") # train target model
+        train(shadow_model, start_epoch, logger, log_string, trainDataLoader_shadow, criterion, testDataLoade_shadow, checkpoints_dir, num_class, "shadow") # train shdaow model
     else:
         #test for MIA
         #generate dataset
         member_target, non_member_target = get_member_non_member_split(train_target, test_target, 1000)
         member_shadow, non_member_shadow = get_member_non_member_split(train_shadow, test_shadow, 1000)
-        testDataLoade_target = torch.utils.data.DataLoader(test_target, batch_size=args.batch_size, shuffle=False, num_workers=10
-                                                           )
-        target_model = model.get_model(num_class, normal_channel=args.use_normals)
-        shadow_model = model.get_model(num_class, normal_channel=args.use_normals)
-        
-        checkpoint_target = torch.load(str(exp_dir) + '/checkpointstarget_epoch_200_model.pth')
-        checkpoint_shadow = torch.load(str(exp_dir) + '/checkpointsshadow_epoch_200_model.pth')
-        target_model.load_state_dict(checkpoint_target['model_state_dict'])
-        shadow_model.load_state_dict(checkpoint_shadow['model_state_dict'])
-        
+
+        with torch.no_grad():
+            instance_acc, class_acc = test(target_model.eval(), trainDataLoader_target, num_class=num_class)
+            print('Train Instance Accuracy: %f, Class Accuracy: %f' % (instance_acc, class_acc))
+            instance_acc, class_acc = test(target_model.eval(), testDataLoade_target, num_class=num_class)
+            print('Test Instance Accuracy: %f, Class Accuracy: %f' % (instance_acc, class_acc))
+            
         attacks = [
             ThresholdAttack(apply_softmax= False),
             SalemAttack(apply_softmax= False, k=3),
@@ -207,16 +215,28 @@ def main(args):
             attack_list.append(result)
             print_attack_results(name[i], result)    
         
-def train(optimizer, scheduler, classifier, start_epoch, logger, log_string, trainDataLoader, criterion, testDataLoader, checkpoints_dir, num_class=40, train_type="target"):
+def train(classifier, start_epoch, logger, log_string, trainDataLoader, criterion, testDataLoader, checkpoints_dir, num_class=40, train_type="target"):
     
     global_epoch = 0
     global_step = 0
     best_instance_acc = 0.0
     best_class_acc = 0.0
-
     '''TRANING'''
+    
     logger.info('Start training %s model' % (train_type))
-
+    if args.optimizer == 'Adam':
+        optimizer = torch.optim.Adam(
+            classifier.parameters(),
+            lr=args.learning_rate,
+            betas=(0.9, 0.999),
+            eps=1e-08,
+            weight_decay=args.decay_rate
+        )
+    else:
+        optimizer = torch.optim.SGD(classifier.parameters(), lr=0.01, momentum=0.9)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.7)
+    
+        
     for epoch in range(start_epoch, args.epoch):
         log_string('Epoch %d (%d/%s):' % (global_epoch + 1, epoch + 1, args.epoch))
         mean_correct = []
@@ -264,10 +284,10 @@ def train(optimizer, scheduler, classifier, start_epoch, logger, log_string, tra
 
             if (epoch == args.epoch - 1):
                 logger.info('Save model...')
-                savepath = str(checkpoints_dir) + train_type + "_epoch_%d" %(epoch+1) + '_model.pth'
+                savepath = os.path.join(str(checkpoints_dir), train_type + "_epoch_%d" %(epoch+1) + '_model.pth')
                 log_string('Saving at %s' % savepath)
                 state = {
-                    'epoch': best_epoch,
+                    'epoch': epoch+1,
                     'instance_acc': instance_acc,
                     'class_acc': class_acc,
                     'model_state_dict': classifier.state_dict(),
