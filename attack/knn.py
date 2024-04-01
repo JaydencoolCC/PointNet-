@@ -32,11 +32,11 @@ class KnnAttack(PredictionScoreAttack):
             print('Compute attack model dataset')
         with torch.no_grad():
             shadow_model.eval()
-            for i, dataset in enumerate([non_member_dataset, member_dataset]):
+            for indx, dataset in enumerate([non_member_dataset, member_dataset]):
                 loader = DataLoader(dataset, batch_size=self.batch_size, num_workers=4)
                 for x, y in loader:
                     x, y = x.to(self.device), y.to(self.device) # x: [b,n,c]
-                    points = self.generate_data(x, k=self.k, npoint=self.npoint) # b k n c
+                    points = self.generate_data(x, k=self.k, npoint=self.npoint) # b k npoint c
                     points = points.transpose(2,3)
                     for i in range(points.shape[0]):
                         x = points[i,:,:,:]
@@ -46,33 +46,79 @@ class KnnAttack(PredictionScoreAttack):
                         else:
                             prediction_scores = output
                     
-                        scores.append(prediction_scores) # n, k, classes
-                    membership_labels.append(torch.full_like(y, i)) #member = 1, non-member = 0
-                    
+                        scores.append(prediction_scores.cpu()) # k, classes len = n
+                    membership_labels.append(torch.full_like(y, indx)) #member = 1, non-member = 0 
+        membership_labels = torch.cat(membership_labels, dim=0).cpu() # (n, 1)
+        #scores = torch.stack(scores) #n k classes
         
-        # loss_values = torch.(values, dim=0).cpu().numpy()
-        # membership_labels = tcatorch.cat(membership_labels, dim=0).cpu().numpy()
-
+        scoers_range = []
+        for val in scores:
+            max_val = torch.max(val)
+            min_val = torch.min(val)
+            scoers_range.append(max_val - min_val) #n
+        
+        
+        scoers_range = np.array(scoers_range)
+        membership_labels = np.array(membership_labels)
+        
         # Compute threshold
+        theta_best = 0.0
+        num_corrects_best = 0
+        for theta in np.linspace(min(scoers_range), max(scoers_range), 10000):
+            num_corrects = (scoers_range[membership_labels == 1] >=
+                            theta).sum() + (scoers_range[membership_labels == 0] < theta).sum()
+            if num_corrects > num_corrects_best:
+                num_corrects_best = num_corrects
+                theta_best = theta
+        self.attack_treshold = theta_best
+        if self.log_training:
+            print(
+                f'Theta set to {self.attack_treshold} achieving {num_corrects_best / (len(member_dataset) + len(non_member_dataset))}'
+            )
         
-       
+        # membership_labels = membership_labels.tolist()
+        # self.shadow_fpr, self.shadow_tpr, self.thresholds, self.auroc = get_roc(membership_labels, scoers_range)
+        # threshold_idx = (self.shadow_tpr - self.shadow_fpr).argmax()
+        # self.attack_treshold = self.thresholds[threshold_idx]
         
+
+        scoers_range_member = scoers_range[membership_labels==1]
+        scoers_range_nonmeber = scoers_range[membership_labels==0]
+        
+        
+        print("Threshold: ", self.attack_treshold)
+        nums_member = sum(scoers_range_member > self.attack_treshold)
+        nums_non_member = sum(scoers_range_nonmeber < self.attack_treshold)
+        print("shadow number of members: ", nums_member)
+        print("shadow number of non members: ", nums_non_member)
+
     def predict_membership(self, target_model: nn.Module, dataset: Dataset):
         values = []
         target_model.eval()
         with torch.no_grad():
             for x, y in DataLoader(dataset, batch_size=self.batch_size, num_workers=4):
                 x, y = x.to(self.device), y.to(self.device)
-                x = x.transpose(2, 1)
-                output, _ = target_model(x)
-                if self.apply_softmax:
-                    pred_scores = torch.softmax(output, dim=1)
-                else:
-                    pred_scores = output
-                ce_loss = cross_entropy(pred_scores, y)
-                values.append(ce_loss)
-        values = torch.cat(values, dim=0)
-        return (values < self.theta).cpu().numpy()
+                points = self.generate_data(x, k=self.k, npoint=self.npoint) # b k npoint c
+                points = points.transpose(2, 3)
+                for i in range(points.shape[0]):
+                    x = points[i,:,:,:]
+                    output, _ = target_model(x)
+                    if self.apply_softmax:
+                        pred_scores = torch.softmax(output, dim=1)
+                    else:
+                        pred_scores = output
+                
+                    max_val = torch.max(pred_scores)
+                    min_val = torch.min(pred_scores)
+                    values.append(max_val - min_val)
+                
+        values = torch.tensor(values).cpu()
+        nums_member = sum(values > self.attack_treshold).item()
+        nums_non_member = sum(values < self.attack_treshold).item()
+        # print("predict number of members: ", nums_member)
+        # print("predict number of non members: ", nums_non_member)
+        
+        return values > self.attack_treshold
 
     def get_attack_model_prediction_scores(self, target_model: nn.Module, dataset: Dataset) -> torch.Tensor:
         values = []
@@ -80,15 +126,20 @@ class KnnAttack(PredictionScoreAttack):
         with torch.no_grad():
             for x, y in DataLoader(dataset, batch_size=self.batch_size):
                 x, y = x.to(self.device), y.to(self.device)
-                x = x.transpose(2, 1)
-                output, _ = target_model(x)
-                if self.apply_softmax:
-                    pred_scores = torch.softmax(output, dim=1)
-                else:
-                    pred_scores = output
-                ce_loss = cross_entropy(pred_scores, y)
-                values.append(ce_loss)
-        values = torch.cat(values, dim=0)
+                points = self.generate_data(x, k=self.k, npoint=self.npoint)
+                points = points.transpose(2, 3)
+                for i in range(points.shape[0]):
+                    x = points[i,:,:,:]
+                    output, _ = target_model(x)
+                    if self.apply_softmax:
+                        pred_scores = torch.softmax(output, dim=1)
+                    else:
+                        pred_scores = output
+                    max_val = torch.max(pred_scores)
+                    min_val = torch.min(pred_scores)
+                    values.append(max_val - min_val)
+                
+        values = torch.tensor(values)
         return values.cpu()
     
     def farthest_point_sample(xyz, npoint):
@@ -160,7 +211,7 @@ class KnnAttack(PredictionScoreAttack):
                         else:
                             prediction_scores = output
                     
-                        scores.append(prediction_scores) # n, k, classes
+                        scores.append(prediction_scores) # (k, classes), len = n
                     labels.append(y)
                     membership_labels.append(torch.full_like(y, idx)) #member = 1, non-member = 0
                     
