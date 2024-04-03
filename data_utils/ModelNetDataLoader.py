@@ -131,6 +131,7 @@ class ModelNetDataLoader(Dataset):
             point_set = point_set[:, 0:3]
 
         return point_set, label[0]
+        #return point_all, label[0]  #返回所有点数
 
     def __getitem__(self, index):
         return self._get_item(index)

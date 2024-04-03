@@ -1,8 +1,52 @@
 import numpy as np
 import torch
-
-
 import torch.nn.functional as F
+
+class AttackResult:
+    attack_acc: float
+    precision: float
+    recall: float
+    tpr: float
+    tnr: float
+    fpr: float
+    fnr: float
+    tp_mmps: float
+    fp_mmps: float
+    fn_mmps: float
+    tn_mmps: float
+
+    def __init__(
+        self,
+        attack_acc: float,
+        precision: float,
+        recall: float,
+        auroc: float,
+        aupr: float,
+        fpr_at_tpr95: float,
+        tpr: float,
+        tnr: float,
+        fpr: float,
+        fnr: float,
+        tp_mmps: float,
+        fp_mmps: float,
+        fn_mmps: float,
+        tn_mmps: float
+    ):
+        self.attack_acc = attack_acc
+        self.precision = precision
+        self.recall = recall
+        self.auroc = auroc
+        self.aupr = aupr
+        self.fpr_at_tpr95 = fpr_at_tpr95
+        self.tpr = tpr
+        self.tnr = tnr
+        self.fpr = fpr
+        self.fnr = fnr
+        self.tp_mmps = tp_mmps
+        self.fp_mmps = fp_mmps
+        self.fn_mmps = fn_mmps
+        self.tn_mmps = tn_mmps
+
 
 def cross_entropy(prob, label):
     epsilon = 1e-12

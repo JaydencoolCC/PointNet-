@@ -9,51 +9,7 @@ from torchmetrics.functional import roc, auroc, precision_recall_curve
 from torchmetrics.utilities.compute import auc
 from utils.model_utils import get_model_prediction_scores
 from utils.model_utils import get_model_prediction_scores_with_lables
-
-class AttackResult:
-    attack_acc: float
-    precision: float
-    recall: float
-    tpr: float
-    tnr: float
-    fpr: float
-    fnr: float
-    tp_mmps: float
-    fp_mmps: float
-    fn_mmps: float
-    tn_mmps: float
-
-    def __init__(
-        self,
-        attack_acc: float,
-        precision: float,
-        recall: float,
-        auroc: float,
-        aupr: float,
-        fpr_at_tpr95: float,
-        tpr: float,
-        tnr: float,
-        fpr: float,
-        fnr: float,
-        tp_mmps: float,
-        fp_mmps: float,
-        fn_mmps: float,
-        tn_mmps: float
-    ):
-        self.attack_acc = attack_acc
-        self.precision = precision
-        self.recall = recall
-        self.auroc = auroc
-        self.aupr = aupr
-        self.fpr_at_tpr95 = fpr_at_tpr95
-        self.tpr = tpr
-        self.tnr = tnr
-        self.fpr = fpr
-        self.fnr = fnr
-        self.tp_mmps = tp_mmps
-        self.fp_mmps = fp_mmps
-        self.fn_mmps = fn_mmps
-        self.tn_mmps = tn_mmps
+from .attack_utils import AttackResult
 
 
 class PredictionScoreAttack:
@@ -89,7 +45,7 @@ class PredictionScoreAttack:
         :param non_member_dataset: The non-member dataset that was **not** used to train the target model.
         :param kwargs: Additional optional parameters for the `predict_membership`-method.
         """
-        member_predictions = self.predict_membership(target_model, member_dataset)
+        member_predictions = self.predict_membership(target_model, member_dataset) #0 or 1
         non_member_predictions = self.predict_membership(target_model, non_member_dataset)
         tp = member_predictions.sum()
         tn = len(non_member_dataset) - non_member_predictions.sum()
@@ -103,6 +59,7 @@ class PredictionScoreAttack:
         rec = tp / (tp + fn)
         acc = (tp + tn) / (tp + tn + fp + fn)
 
+        #用作度量的分数，如熵，最大值分数，loss等
         member_pred_scores = self.get_attack_model_prediction_scores(target_model, dataset=member_dataset)
         non_member_pred_scores = self.get_attack_model_prediction_scores(target_model, dataset=non_member_dataset)
         concat_preds = torch.cat((non_member_pred_scores, member_pred_scores))
@@ -125,6 +82,7 @@ class PredictionScoreAttack:
         fpr_at_tpr95 = tm_fpr[tpr_greater95_indices[0]].item()
 
         # get the mmps values
+        # softmax 层的输出，[n, classes_num]
         tp_pred_scores = self.get_pred_score_classified_as_members(
             target_model, member_dataset, apply_softmax=self.apply_softmax
         )

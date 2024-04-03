@@ -19,16 +19,6 @@ class ThresholdAttack(PredictionScoreAttack):
     ):
         labels = [0 for _ in range(len(non_member_dataset))] + [1 for _ in range(len(member_dataset))]
 
-        # get the prediction scores of the shadow model on the members and the non-members in order to attack the target model
-        # pred_scores_shadow_member = get_model_prediction_scores(
-        #     model=shadow_model, 
-        #     apply_softmax=self.apply_softmax, 
-        #     dataset=member_dataset, 
-        #     batch_size=self.batch_size, 
-        #     num_workers=8
-        # ).max(dim=1)[0].tolist()
-        
-        #get the prediction scores of the shadow model on the members and the non-members in order to attack the target model
         pred_scores_shadow_member = get_model_prediction_scores(
             model=shadow_model, 
             apply_softmax=self.apply_softmax, 
@@ -37,16 +27,8 @@ class ThresholdAttack(PredictionScoreAttack):
             num_workers=8
         )
         max_pred_scores_shadow_member = pred_scores_shadow_member.max(dim=1)[0]
-        second_max_pred_scores_shadow_member = pred_scores_shadow_member.topk(2, dim=1).values[:, 1]
-        pred_scores_shadow_member = ( max_pred_scores_shadow_member - second_max_pred_scores_shadow_member).tolist()
         pred_scores_shadow_member = max_pred_scores_shadow_member.tolist()
-        # pred_scores_shadow_non_member = get_model_prediction_scores(
-        #     model=shadow_model,
-        #     apply_softmax=self.apply_softmax,
-        #     dataset=non_member_dataset,
-        #     batch_size=self.batch_size,
-        #     num_workers=8
-        # ).max(dim=1)[0].tolist()
+
         pred_scores_shadow_non_member = get_model_prediction_scores(
             model=shadow_model,
             apply_softmax=self.apply_softmax,
@@ -55,8 +37,6 @@ class ThresholdAttack(PredictionScoreAttack):
             num_workers=8
         )
         max_pred_scores_shadow_non_member = pred_scores_shadow_non_member.max(dim=1)[0]
-        second_max_pred_scores_shadow_non_member = pred_scores_shadow_non_member.topk(2, dim=1).values[:, 1]
-        pred_scores_shadow_non_member = (max_pred_scores_shadow_non_member - second_max_pred_scores_shadow_non_member).tolist()
         pred_scores_shadow_non_member = max_pred_scores_shadow_non_member.tolist()
         
         pred_scores = pred_scores_shadow_non_member + pred_scores_shadow_member
